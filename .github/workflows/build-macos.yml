@@ -1,0 +1,132 @@
+name: Build macOS
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-arm64:
+    name: macOS ARM64
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      CCACHE_SIZE: 3G
+      CCACHE_DIR: ${{ github.workspace }}/ccache
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_EMOJI: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+    steps:
+      - name: Clone from GitLab
+        run: |
+          git clone --branch XBOX-Overhaul --depth 1 \
+            https://gitlab.com/ilikegothmommys/openmw-xbox.git .
+
+      - name: Restore ccache
+        uses: actions/cache@v5
+        with:
+          path: ccache
+          key: macos-arm64-ccache-${{ hashFiles('CI/macos/deps_versions.sh') }}-${{ github.sha }}
+          restore-keys: |
+            macos-arm64-ccache-${{ hashFiles('CI/macos/deps_versions.sh') }}-
+            macos-arm64-ccache-
+
+      - name: Install dependencies
+        run: ./CI/before_install.macos.sh
+
+      - name: Install ccache
+        run: brew install ccache
+
+      - name: Configure (CMake)
+        run: ./CI/before_script.macos.sh -C
+
+      - name: Build & Package
+        run: ./CI/macos/build.sh
+
+      - name: Rename DMG
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          mv build/OpenMW-*.dmg "build/Xbox-OpenMW-arm64-${DATE}_${{ github.run_number }}.dmg"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenMW-XBOX-macOS-arm64
+          path: build/Xbox-OpenMW-*.dmg
+
+  build-amd64:
+    name: macOS Intel (amd64)
+    runs-on: macos-26-intel
+    timeout-minutes: 120
+    env:
+      MACOS_AMD64: "true"
+      CCACHE_SIZE: 3G
+      CCACHE_DIR: ${{ github.workspace }}/ccache
+      HOMEBREW_NO_AUTO_UPDATE: 1
+      HOMEBREW_NO_EMOJI: 1
+      HOMEBREW_NO_INSTALL_CLEANUP: 1
+
+    steps:
+      - name: Clone from GitLab
+        run: |
+          git clone --branch XBOX-Overhaul --depth 1 \
+            https://gitlab.com/ilikegothmommys/openmw-xbox.git .
+
+      - name: Restore ccache
+        uses: actions/cache@v5
+        with:
+          path: ccache
+          key: macos-amd64-ccache-${{ hashFiles('CI/macos/deps_versions.sh') }}-${{ github.sha }}
+          restore-keys: |
+            macos-amd64-ccache-${{ hashFiles('CI/macos/deps_versions.sh') }}-
+            macos-amd64-ccache-
+
+      - name: Install dependencies
+        run: ./CI/before_install.macos.sh
+
+      - name: Install ccache
+        run: brew install ccache
+
+      - name: Configure (CMake)
+        run: ./CI/before_script.macos.sh -C
+
+      - name: Build & Package
+        run: ./CI/macos/build.sh
+
+      - name: Rename DMG
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          mv build/OpenMW-*.dmg "build/Xbox-OpenMW-amd64-${DATE}_${{ github.run_number }}.dmg"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: OpenMW-XBOX-macOS-amd64
+          path: build/Xbox-OpenMW-*.dmg
+
+  release:
+    name: Create Release
+    needs: [build-arm64, build-amd64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all DMGs
+        uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          DATE=$(date -u +%Y-%m-%d)
+          TAG="build-${DATE}_${{ github.run_number }}"
+          TITLE="Xbox OpenMW - ${DATE} #${{ github.run_number }}"
+
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "$TITLE" \
+            --notes "macOS builds from [XBOX-Overhaul](https://gitlab.com/ilikegothmommys/openmw-xbox/-/tree/XBOX-Overhaul) branch." \
+            artifacts/**/*.dmg
