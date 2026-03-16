@@ -1,0 +1,66 @@
+name: Build Linux
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-amd64:
+    name: Generic Linux (amd64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CCACHE_SIZE: 3G
+      CCACHE_DIR: ${{ github.workspace }}/ccache
+
+    steps:
+      - name: Clone from GitLab
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --branch XBOX-Overhaul --depth 1 \
+            https://gitlab.com/ilikegothmommys/openmw-xbox.git src
+
+      - name: Restore caches
+        uses: actions/cache@v5
+        with:
+          path: |
+            ccache
+            src/apt-cache
+          key: linux-amd64-${{ github.sha }}
+          restore-keys: |
+            linux-amd64-
+
+      - name: Install dependencies
+        shell: bash
+        working-directory: src
+        run: |
+          set -euo pipefail
+          sudo ./CI/install_debian_deps.sh gcc_preprocess openmw-deps openmw-deps-dynamic
+
+      - name: Build & Package
+        shell: bash
+        working-directory: src
+        env:
+          CC: ccache gcc
+          CXX: ccache g++
+          CCACHE_BASEDIR: ${{ github.workspace }}/src
+          CCACHE_DIR: ${{ github.workspace }}/ccache
+        run: |
+          set -euo pipefail
+          mkdir -p "${CCACHE_DIR}"
+          ccache -z || true
+          ccache -M "${CCACHE_SIZE}" || true
+
+          DATE=$(date -u +%Y-%m-%d)
+          ARCHIVE_TAR=1 \
+          OUT_TAR="OpenMW-XBOX-UI-linux-amd64-${DATE}_${{ github.run_number }}.tar.xz" \
+            ./CI/build_openmw_generic_xz.sh
+
+          ccache -sv || true
+
+      - name: Upload tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenMW-XBOX-Linux-amd64
+          path: src/OpenMW-XBOX-UI-linux-amd64-*.tar.xz
