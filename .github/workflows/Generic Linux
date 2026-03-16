@@ -4,10 +4,18 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-amd64:
-    name: Generic Linux (amd64)
-    runs-on: ubuntu-24.04
+  build:
+    name: Generic Linux (${{ matrix.arch_out }})
+    runs-on: ${{ matrix.runs_on }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch_out: amd64
+            runs_on: ubuntu-24.04
+          - arch_out: arm64
+            runs_on: ubuntu-24.04-arm
     env:
       CCACHE_SIZE: 3G
       CCACHE_DIR: ${{ github.workspace }}/ccache
@@ -26,9 +34,9 @@ jobs:
           path: |
             ccache
             src/apt-cache
-          key: linux-amd64-${{ github.sha }}
+          key: linux-${{ matrix.arch_out }}-${{ github.sha }}
           restore-keys: |
-            linux-amd64-
+            linux-${{ matrix.arch_out }}-
 
       - name: Install dependencies
         shell: bash
@@ -62,21 +70,51 @@ jobs:
         shell: bash
         working-directory: src
         env:
+          ARCH_OUT: ${{ matrix.arch_out }}
           CCACHE_BASEDIR: ${{ github.workspace }}/src
           CCACHE_DIR: ${{ github.workspace }}/ccache
         run: |
           set -euo pipefail
+
           DATE=$(date -u +%Y-%m-%d)
           ROOT="$(pwd)"
           BUILD_DIR="${BUILD_DIR:-$ROOT/_build_release}"
           STAGE_DIR="${STAGE_DIR:-$ROOT/_pkg_stage}"
           BUNDLE_DIR="${BUNDLE_DIR:-$ROOT/OpenMW-XBOX-UI}"
-          OUT_TAR="${OUT_TAR:-$ROOT/OpenMW-XBOX-UI-linux-amd64-${DATE}_${{ github.run_number }}.tar.xz}"
+          OUT_TAR="${OUT_TAR:-$ROOT/OpenMW-XBOX-UI-linux-${ARCH_OUT}-${DATE}_${{ github.run_number }}.tar.xz}"
           XZ_LEVEL="${XZ_LEVEL:-9}"
           XZ_EXTREME="${XZ_EXTREME:-0}"
 
           die(){ echo "ERROR: $*" >&2; exit 1; }
           have(){ command -v "$1" >/dev/null 2>&1; }
+
+          arch_tag() {
+            case "$(uname -m)" in
+              x86_64|amd64) echo "x86_64" ;;
+              aarch64|arm64) echo "aarch64" ;;
+              *) echo "$(uname -m)" ;;
+            esac
+          }
+
+          resolve_multiarch() {
+            local ma=""
+            if have dpkg-architecture; then
+              ma="$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || true)"
+            fi
+            if [ -z "$ma" ]; then
+              case "$(arch_tag)" in
+                x86_64) ma="x86_64-linux-gnu" ;;
+                aarch64) ma="aarch64-linux-gnu" ;;
+                *) ma="" ;;
+              esac
+            fi
+            echo "$ma"
+          }
+
+          ARCH_TAG="${ARCH_TAG:-$(arch_tag)}"
+          MULTIARCH="${MULTIARCH:-$(resolve_multiarch)}"
+          LIB_MULTIARCH_DIR=""
+          [ -n "$MULTIARCH" ] && [ -d "/usr/lib/$MULTIARCH" ] && LIB_MULTIARCH_DIR="/usr/lib/$MULTIARCH"
 
           [ -f "$ROOT/CMakeLists.txt" ] || die "Run from repo root (CMakeLists.txt missing)."
           have cmake  || die "cmake not found"
@@ -145,9 +183,9 @@ jobs:
           cp -a "$BIN_SRC/"* "$BUNDLE_DIR/"
 
           pushd "$BUNDLE_DIR" >/dev/null
-          [ -f ./openmw ] && mv ./openmw ./OpenMW.x86_64
-          [ -f ./openmw-launcher ] && mv ./openmw-launcher ./OpenMW-Launcher.x86_64
-          chmod +x ./OpenMW.x86_64 ./OpenMW-Launcher.x86_64 2>/dev/null || true
+          [ -f ./openmw ] && mv ./openmw "./OpenMW.${ARCH_TAG}"
+          [ -f ./openmw-launcher ] && mv ./openmw-launcher "./OpenMW-Launcher.${ARCH_TAG}"
+          chmod +x "./OpenMW.${ARCH_TAG}" "./OpenMW-Launcher.${ARCH_TAG}" 2>/dev/null || true
           popd >/dev/null
 
           RES_SRC=""
@@ -175,11 +213,13 @@ jobs:
           copy_named_from_stage "gamecontrollerdb.txt"
           [ -f "$BUNDLE_DIR/defaults.bin" ] || die "defaults.bin missing in bundle root"
 
-          [ -d "$PREFIX/lib/x86_64-linux-gnu/openmw" ] && cp -a "$PREFIX/lib/x86_64-linux-gnu/openmw/"* "$BUNDLE_DIR/plugins/" || true
+          [ -n "$MULTIARCH" ] && [ -d "$PREFIX/lib/$MULTIARCH/openmw" ] && cp -a "$PREFIX/lib/$MULTIARCH/openmw/"* "$BUNDLE_DIR/plugins/" || true
           [ -d "$PREFIX/lib/openmw" ] && cp -a "$PREFIX/lib/openmw/"* "$BUNDLE_DIR/plugins/" || true
 
           QT_PLUGINS_SRC=""
-          for d in /usr/lib/x86_64-linux-gnu/qt6/plugins /usr/lib/qt6/plugins; do
+          for d in \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/qt6/plugins}" \
+            /usr/lib/qt6/plugins; do
             if [ -d "$d/platforms" ]; then QT_PLUGINS_SRC="$d"; break; fi
           done
           if [ -n "$QT_PLUGINS_SRC" ]; then
@@ -193,7 +233,10 @@ jobs:
           fi
 
           OSG_PLUGINS_SRC=""
-          for base in /usr/lib/x86_64-linux-gnu /usr/lib; do
+          for base in \
+            "${LIB_MULTIARCH_DIR:-}" \
+            /usr/lib; do
+            [ -n "$base" ] || continue
             p="$(ls -d "$base"/osgPlugins-* 2>/dev/null | head -n 1 || true)"
             if [ -n "$p" ] && [ -d "$p" ]; then OSG_PLUGINS_SRC="$p"; break; fi
           done
@@ -238,8 +281,8 @@ jobs:
           }
 
           deps_tmp="$(mktemp)"
-          ldd ./OpenMW.x86_64 | awk '/=> \\//{print $3} /^\\//{print $1}' >> "$deps_tmp" || true
-          ldd ./OpenMW-Launcher.x86_64 | awk '/=> \\//{print $3} /^\\//{print $1}' >> "$deps_tmp" || true
+          ldd "./OpenMW.${ARCH_TAG}" | awk '/=> \\//{print $3} /^\\//{print $1}' >> "$deps_tmp" || true
+          ldd "./OpenMW-Launcher.${ARCH_TAG}" | awk '/=> \\//{print $3} /^\\//{print $1}' >> "$deps_tmp" || true
 
           if [ -d ./qt/plugins/platforms ]; then
             find ./qt/plugins/platforms -type f -name '*.so' -print0 \
@@ -260,27 +303,29 @@ jobs:
           done
           rm -f "$deps_tmp"
 
-          for f in /usr/lib/x86_64-linux-gnu/libavcodec.so.60 \
-                   /usr/lib/x86_64-linux-gnu/libavformat.so.60 \
-                   /usr/lib/x86_64-linux-gnu/libavutil.so.58 \
-                   /usr/lib/x86_64-linux-gnu/libswscale.so.7 \
-                   /usr/lib/x86_64-linux-gnu/libswresample.so.4; do
+          for f in \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libavcodec.so.60}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libavformat.so.60}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libavutil.so.58}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libswscale.so.7}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libswresample.so.4}"; do
             [ -e "$f" ] && copy_dep "$f"
           done
 
-          for f in /usr/lib/x86_64-linux-gnu/libcurl.so.4 \
-                   /usr/lib/x86_64-linux-gnu/libnghttp2.so.* \
-                   /usr/lib/x86_64-linux-gnu/libidn2.so.* \
-                   /usr/lib/x86_64-linux-gnu/libpsl.so.* \
-                   /usr/lib/x86_64-linux-gnu/libz.so.* \
-                   /usr/lib/x86_64-linux-gnu/libbrotlidec.so.* \
-                   /usr/lib/x86_64-linux-gnu/libbrotlicommon.so.* \
-                   /usr/lib/x86_64-linux-gnu/libssl.so.3 \
-                   /usr/lib/x86_64-linux-gnu/libcrypto.so.3; do
+          for f in \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libcurl.so.4}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libnghttp2.so.*}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libidn2.so.*}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libpsl.so.*}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libz.so.*}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libbrotlidec.so.*}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libbrotlicommon.so.*}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libssl.so.3}" \
+            "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libcrypto.so.3}"; do
             [ -e "$f" ] && copy_dep "$f"
           done
 
-          for f in /usr/lib/x86_64-linux-gnu/libunshield.so.0; do
+          for f in "${LIB_MULTIARCH_DIR:+$LIB_MULTIARCH_DIR/libunshield.so.0}"; do
             [ -e "$f" ] && copy_dep "$f"
           done
 
@@ -319,7 +364,22 @@ jobs:
           export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
           export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 
-          exec "$GAMEDIR/OpenMW.x86_64" --resources "$GAMEDIR/resources" "$@"
+          arch_tag() {
+            case "$(uname -m)" in
+              x86_64|amd64) echo "x86_64" ;;
+              aarch64|arm64) echo "aarch64" ;;
+              *) echo "$(uname -m)" ;;
+            esac
+          }
+
+          BIN="$GAMEDIR/OpenMW.$(arch_tag)"
+          if [ ! -x "$BIN" ]; then
+            for cand in "$GAMEDIR/OpenMW.aarch64" "$GAMEDIR/OpenMW.x86_64" "$GAMEDIR"/OpenMW.*; do
+              [ -x "$cand" ] && BIN="$cand" && break
+            done
+          fi
+
+          exec "$BIN" --resources "$GAMEDIR/resources" "$@"
           EOW
           chmod +x ./openmw
 
@@ -355,12 +415,27 @@ jobs:
           export QT_QPA_PLATFORM_PLUGIN_PATH="$GAMEDIR/qt/plugins/platforms"
           export OSG_LIBRARY_PATH="$GAMEDIR"
 
-          exec "$GAMEDIR/OpenMW-Launcher.x86_64" --resources "$GAMEDIR/resources" "$@"
+          arch_tag() {
+            case "$(uname -m)" in
+              x86_64|amd64) echo "x86_64" ;;
+              aarch64|arm64) echo "aarch64" ;;
+              *) echo "$(uname -m)" ;;
+            esac
+          }
+
+          BIN="$GAMEDIR/OpenMW-Launcher.$(arch_tag)"
+          if [ ! -x "$BIN" ]; then
+            for cand in "$GAMEDIR/OpenMW-Launcher.aarch64" "$GAMEDIR/OpenMW-Launcher.x86_64" "$GAMEDIR"/OpenMW-Launcher.*; do
+              [ -x "$cand" ] && BIN="$cand" && break
+            done
+          fi
+
+          exec "$BIN" --resources "$GAMEDIR/resources" "$@"
           EOW
           chmod +x ./OpenMW-Launcher
 
           echo "==> Strip"
-          strip --strip-unneeded ./OpenMW.x86_64 ./OpenMW-Launcher.x86_64 2>/dev/null || true
+          strip --strip-unneeded "./OpenMW.${ARCH_TAG}" "./OpenMW-Launcher.${ARCH_TAG}" 2>/dev/null || true
           find ./lib -type f -name '*.so*' -exec strip --strip-unneeded {} + 2>/dev/null || true
           find ./qt -type f -name '*.so' -exec strip --strip-unneeded {} + 2>/dev/null || true
           find . -maxdepth 1 -type d -name 'osgPlugins-*' -print0 2>/dev/null \
@@ -383,5 +458,5 @@ jobs:
       - name: Upload tarball
         uses: actions/upload-artifact@v4
         with:
-          name: OpenMW-XBOX-Linux-amd64
-          path: src/OpenMW-XBOX-UI-linux-amd64-*.tar.xz
+          name: OpenMW-XBOX-Linux-${{ matrix.arch_out }}
+          path: src/OpenMW-XBOX-UI-linux-${{ matrix.arch_out }}-*.tar.xz
